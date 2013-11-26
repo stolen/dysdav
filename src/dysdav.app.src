@@ -1,0 +1,8 @@
+{application, dysdav, [
+  {description, "Distributed webdav service with simple Key-Value backend"},
+  {vsn, "0.1"},
+  {registered, []},
+  {applications, [kernel, stdlib]},
+  {mod, {dysdav_app, []}}
+]}.
+
