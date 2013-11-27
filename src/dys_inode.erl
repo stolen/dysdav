@@ -1,4 +1,6 @@
 -module(dys_inode).
+-include("dys_inode.hrl").
+
 -behavior(gen_server).
 
 % low-level inode functions. Used for debug, no real need in working system
@@ -6,14 +8,14 @@
 
 % inode server API
 -export([start_link/1]).
--export([add_child/2, get_child/2, list_children/1, describe_children/1, update_child/2, del_child/2]).
+-export([add_child/3, get_child/2, list_children/1, describe_children/1, update_child/2, del_child/2]).
 
 % gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 % Fire up supervisor
 start_link(StoreKey) ->
-  gen_server:start_link(?MODULE, [StoreKey], []).
+  gen_server:start_link(?MODULE, [self(), StoreKey], []).
 
 
 % Min and max child count. When there are few children, aggregation or local rebalancing fires up.
@@ -24,19 +26,6 @@ start_link(StoreKey) ->
 % Storage adapter
 -define(STORAGE, dys_storage_mongo).
 
-% Early version: directory tree is B-tree with metadata cache
--record(inode_v0, {
-    % id is persistent, every inode has its own id
-    id = undefined, % There should be map of ID -> LatestStoreKey for dir-top inodes
-    version = 0, % put millisecond timestamp here
-    prev_version = undefined, % pointer to previous version if any
-    last_action = undefined, % when there is previous version, it is good to keep change that lead to this one
-    children = [], % sorted list of tuples {Name, StorageId, [{Key, Value}] = Metadata}
-    left = undefined,  % left, right are store keys of sub-inodes with filenames less and more than local respectively
-    right = undefined, % ... and their child count as tuple {FarChildName, SubStKey, SubAggregators}
-                      % SubAggregators = [{files, 0}, {dirs, 0}, {size, 0}] % Free form, add new ones when needed
-    extra = [] % Any info important only for this inode
-    }).
 
 % Create empty inode with given ID
 create(ID) when is_binary(ID) ->
@@ -61,12 +50,36 @@ restore(Bin) ->
       {error, bad_dump}
   end.
 
+% Insert child replacing possibly existing one
+insert_inode_child(Spec, #inode_v0{children = Children} = Inode) ->
+  NewChildren = lists:ukeymerge(1, [Spec], Children),
+  Inode#inode_v0{version = dys_time:now(), children = NewChildren}.
+
+% Make summary for this inode
+make_summary(#inode_v0{root = true} = Inode) ->
+  % We are root, so our summary is directory child in leaf node
+  {undefined, dir, store_key(Inode), gather_metadata(Inode)};
+
+make_summary(#inode_v0{root = false, children = Children} = Inode) ->
+  % We are root, so our summary is directory child in leaf node
+  Metadata = gather_metadata(Inode),
+  {Min, _, _, _} = hd(Children),
+  {Max, _, _, _} = lists:last(Children),
+  {{Min, Max}, {inode, proplists:get_value(records, Metadata)}, store_key(Inode), Metadata}.
+
+gather_metadata(#inode_v0{leaf = true, children = Children}) ->
+  % Leaf metadata is currently number of records=children
+  [{records, length(Children)}];
+gather_metadata(#inode_v0{leaf = false, children = Children}) ->
+  RecordCount = lists:sum([RC || {_, {inode, RC}, _, _} <- Children]),
+  [{records, RecordCount}].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Main live inode API
 
-add_child(Pid, {Name, StorageId, Metadata}) when is_pid(Pid), is_binary(Name), is_binary(StorageId), is_list(Metadata) ->
-  gen_server:call(Pid, {add_child, Name, StorageId, Metadata}).
+% TODO: [<<"path">>, <<"to">> | {<<"Child">>, file, <<"xxyy">>, [{size, 100500}]}]
+add_child(Pid, ChildSpec, Options) ->
+  gen_server:call(Pid, {add_child, ChildSpec, Options}).
 
 get_child(Pid, Name) when is_pid(Pid), is_binary(Name) ->
   gen_server:call(Pid, {get_child, Name}).
@@ -88,23 +101,59 @@ del_child(Pid, Name) when is_pid(Pid), is_binary(Name) ->
 % gen_server implementation
 
 -record(state, {
+    inode = undefined,
+    owners = [],
+    pid_cache = gb_trees:empty()
     }).
 
-init([StorageKey]) when is_binary(StorageKey) ->
+init([OwnerPid, StorageKey]) when is_pid(OwnerPid), is_binary(StorageKey) ->
   {ok, Inode} = restore(?STORAGE:fetch(inode, StorageKey)),
-  {ok, {Inode, #state{}}}.
+  {ok, #state{inode = Inode, owners = [OwnerPid]}}.
 
-handle_call(_, _, {Inode, State}) ->
-  {reply, not_implemented, {Inode, State}}.
+handle_call({add_child, ChildSpec, Options}, _, #state{} = State) ->
+  case do_add_child(ChildSpec, Options, State) of
+    {ok, #state{inode = Inode} = NewState} ->
+      {reply, {ok, make_summary(Inode)}, NewState};
+    {error, Error, NewState} -> 
+      {reply, {error, Error}, NewState}
+  end;
 
-handle_info(_, {Inode, State}) ->
-  {noreply, {Inode, State}}.
+handle_call(_, _, #state{} = State) ->
+  {reply, {error, not_implemented}, State}.
 
-handle_cast(_, {Inode, State}) ->
-  {noreply, {Inode, State}}.
+handle_info(_, State) ->
+  {noreply, State}.
+
+handle_cast(_, State) ->
+  {noreply, State}.
 
 terminate(_, _) ->
   ok.
 
-code_change(_, {Inode, State}, _) ->
-  {ok, {Inode, State}}.
+code_change(_, #state{} = State, _) ->
+  {ok, State}.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Internals
+
+valid_childspec({Name, Type, StoreKey, Metadata}) when is_binary(Name), is_binary(StoreKey), is_list(Metadata) ->
+  valid_childtype(Type);
+valid_childspec(_) ->
+  false.
+
+valid_childtype(file) -> true;
+valid_childtype(dir) -> true;
+valid_childtype(_) -> false.
+
+
+do_add_child(ChildSpec, Options, State) ->
+  case valid_childspec(ChildSpec) of
+    true -> do_add_valid_child(ChildSpec, Options, State);
+    false -> {error, invalid_childspec, State}
+  end.
+
+do_add_valid_child({_Name, _, _, _} = Spec, _Options, #state{inode = Inode} = State) when ?LEAF(Inode) ->
+  NewInode = insert_inode_child(Spec, Inode),
+  {ok, State#state{inode = NewInode}}.
+
