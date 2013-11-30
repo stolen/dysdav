@@ -6,6 +6,8 @@
 % Stupid API
 -export([store/3, fetch/2, delete/2, delete/3]).
 
+-export([gen_key/1]).
+
 
 setup() ->
   application:start(emongo),
@@ -43,3 +45,12 @@ delete(Type, Key, Value) when is_atom(Type), is_binary(Key), is_binary(Value) ->
   ok = emongo:delete(dys_meta, type_to_collection(Type),
                      [{<<"_id">>, Key}, {<<"value">>, {binary, 0, Value}}]).
 
+
+% Generate unique StoreKey
+gen_key(inode) ->
+  NodeHash = erlang:adler32(atom_to_binary(node(), latin1)),
+  UniqueTime = dys_time:unique(),
+  iolist_to_binary([
+      erlang:integer_to_list(NodeHash, 36),
+      ".",
+      erlang:integer_to_list(UniqueTime, 36) ]).
