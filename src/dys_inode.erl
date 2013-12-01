@@ -5,8 +5,11 @@
 -export([create/1, dump/1, store_key/1, restore/1]).
 
 % High-level inode interface
--export([make_summary/1, insert_inode_child/2]).
+-export([check/1, make_summary/1, insert_inode_child/2]).
 
+
+% Check inode, future: possibly fix
+check(#inode_v0{} = Inode) -> Inode.
 
 % Create empty inode with given ID
 create(ID) when is_binary(ID) ->

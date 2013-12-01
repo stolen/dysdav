@@ -7,15 +7,19 @@
 -define(STORAGE, dys_storage_mongo).
 
 % inode server API
--export([start_link/1]).
+-export([start_link/2]).
 -export([add_child/3, get_child/2, list_children/1, describe_children/1, update_child/2, del_child/2]).
 
 % gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 % Fire up supervisor
-start_link(StoreKey) ->
-  gen_server:start_link(?MODULE, [self(), StoreKey], []).
+start_link(revive, StorageKey) ->
+  {ok, Inode} = dys_inode:restore(?STORAGE:fetch(inode, StorageKey)),
+  start_link(serve, Inode);
+
+start_link(serve, Inode) ->
+  gen_server:start_link(?MODULE, [self(), Inode], []).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Main live inode API
@@ -49,9 +53,8 @@ del_child(Pid, Name) when is_pid(Pid), is_binary(Name) ->
     pid_cache = gb_trees:empty()
     }).
 
-init([OwnerPid, StorageKey]) when is_pid(OwnerPid), is_binary(StorageKey) ->
-  {ok, Inode} = dys_inode:restore(?STORAGE:fetch(inode, StorageKey)),
-  {ok, #state{inode = Inode, owners = [OwnerPid]}}.
+init([OwnerPid, Inode]) when is_pid(OwnerPid) ->
+  {ok, #state{inode = dys_inode:check(Inode), owners = [OwnerPid]}}.
 
 handle_call({add_child, ChildSpec, Options}, _, #state{} = State) ->
   case do_add_child(ChildSpec, Options, State) of
