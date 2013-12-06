@@ -2,18 +2,31 @@
 -include("dys_inode.hrl").
 
 % low-level inode functions.
--export([create/1, dump/1, store_key/1, restore/1]).
+-export([create/0, dump/1, store_key/1, restore/1]).
 
 % High-level inode interface
--export([check/1, make_summary/1, insert_inode_child/2]).
+-export([check/1, make_summary/1]).
+-export([insert_inode_child/2, needs_split/1]).
 
 
 % Check inode, future: possibly fix
 check(#inode_v0{} = Inode) -> Inode.
 
+create() ->
+  create(gen_id()).
+
 % Create empty inode with given ID
 create(ID) when is_binary(ID) ->
-  #inode_v0{id = ID, version = dys_time:now()}.
+  #inode_v0{id = ID}.
+
+% Generate unique traceable inode id
+gen_id() ->
+  NodeHash = erlang:adler32(atom_to_binary(node(), latin1)),
+  UniqueTime = dys_time:unique(),
+  iolist_to_binary([
+      erlang:integer_to_list(NodeHash, 36),
+      ".",
+      erlang:integer_to_list(UniqueTime, 36) ]).
 
 % Save whole inode in compressed external format
 dump(#inode_v0{} = Inode) ->
@@ -49,7 +62,7 @@ make_summary(#inode_v0{root = false, children = Children} = Inode) ->
   Metadata = gather_metadata(Inode),
   {Min, _, _, _} = hd(Children),
   {Max, _, _, _} = lists:last(Children),
-  {{Min, Max}, {inode, proplists:get_value(records, Metadata)}, store_key(Inode), Metadata}.
+  {minmax(Min, Max), {inode, proplists:get_value(records, Metadata)}, store_key(Inode), Metadata}.
 
 gather_metadata(#inode_v0{leaf = true, children = Children}) ->
   % Leaf metadata is currently number of records=children
@@ -57,4 +70,46 @@ gather_metadata(#inode_v0{leaf = true, children = Children}) ->
 gather_metadata(#inode_v0{leaf = false, children = Children}) ->
   RecordCount = lists:sum([RC || {_, {inode, RC}, _, _} <- Children]),
   [{records, RecordCount}].
+
+minmax({Min, _}, {_, Max}) -> {Min, Max};
+minmax(Min, Max) -> {Min, Max}.
+
+
+needs_split(#inode_v0{children = Children} = Inode) ->
+  needs_split(Inode, length(Children)).
+
+needs_split(_Inode, Len) when Len =< ?MAX_CHILDREN ->
+  false;
+needs_split(#inode_v0{root = false, leaf = Leaf, id = Id, version = Ver0,
+                      children = Children} = Inode0, Len) ->
+  {Ch1, Ch2} = lists:split(Len div 2, Children),
+  Now = dys_time:now(),
+  % Inode1 is just evolution of local inode
+  Inode1 = Inode0#inode_v0{version = Ver0 + 1,
+                           parent = {Id, Ver0}, actions = [{Now, split}],
+                           children = Ch1},
+  % Inode2 is newly created sibling
+  Inode2 = #inode_v0{root = false, leaf = Leaf, id = gen_id(),
+                     parent = {Id, Ver0}, actions = [{Now, split}],
+                     children = Ch2},
+  {sibling, Inode1, Inode2};
+
+needs_split(#inode_v0{root = true, leaf = Leaf, id = Id, version = Ver0,
+                      children = Children} = Inode0, Len) ->
+  {Ch1, Ch2} = lists:split(Len div 2, Children),
+
+  Now = dys_time:now(),
+  ChildSkel = #inode_v0{root = false, leaf = Leaf, parent = {Id, Ver0},
+                        actions = [{Now, split_root}]},
+
+  Inode1 = ChildSkel#inode_v0{id = gen_id(), children = Ch1},
+  Inode2 = ChildSkel#inode_v0{id = gen_id(), children = Ch2},
+  NewRoot = Inode0#inode_v0{version = Ver0 + 1,
+                            parent = {Id, Ver0}, actions = [{Now, new_level}],
+                            children = [
+        make_summary(Inode1),
+        make_summary(Inode2) ]},
+
+  {children, NewRoot, [Inode1, Inode2]}.
+
 

@@ -1,14 +1,22 @@
 -define(INODE_ORDER, 100).
 
+-define(MAX_CHILDREN,
+%        ?INODE_ORDER).
+        1). % test
+
+-define(MIN_CHILDREN,
+%        ?INODE_ORDER div 3). % Choose good value to avoid often merges but keep inodes pretty full
+        1). % test
+
 % Early version: directory tree is B-tree with metadata cache
 -record(inode_v0, {
     root = true, % This means that inode is directory entry and must update directory latest StoreKey
     leaf = true, % This means children are records, (other inodes otherwise)
     % id is persistent, every inode has its own id
-    id = undefined, % There should be map of ID -> LatestStoreKey for root inodes
-    version = 0, % put millisecond timestamp here
-    prev_version = undefined, % pointer to previous version if any
-    last_action = undefined, % when there is previous version, it is good to keep change that lead to this one
+    id = undefined, % There should be map of ID -> LatestVersion for root inodes
+    version = 0, % Incrementing version number
+    parent = undefined, % parent {Id, Version}
+    actions = [], % Actions between previous and current version. [{Timestamp, Action}]
     children = [], % sorted list of children (see below)
     extra = [] % Any info important only for this inode
     }).
