@@ -16,18 +16,20 @@ start_link() ->
   supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-  InodeSpec = {undefined,
-               {dys_inode_srv, start_link, []},
-               temporary, 1000, worker, [dys_inode_srv, dys_inode]},
-  {ok, {{simple_one_for_one, 1000, 1}, [InodeSpec]}}.
+  {ok, {{one_for_one, 1000, 1}, []}}.
 
+inode_spec(Name, Args) ->
+  {Name,
+   {dys_inode_srv, start_link, Args},
+   temporary, 1000, worker, [dys_inode_srv, dys_inode]}.
 
 % Request to serve given inode
 serve(Inode) ->
   serve(whereis(?MODULE), Inode).
 
 serve(Sup, Inode) ->
-  supervisor:start_child(Sup, [serve, Inode, Sup]).
+  Name = dys_inode:id(Inode),
+  supervisor:start_child(Sup, inode_spec(Name, [serve, Inode, Sup])).
 
 
 % Request to read inode from DB by key and serve it
@@ -35,4 +37,12 @@ revive(StoreKey) ->
   revive(whereis(?MODULE), StoreKey).
 
 revive(Sup, StoreKey) ->
-  supervisor:start_child(Sup, [revive, StoreKey, Sup]).
+  Name = dys_inode:id(StoreKey),
+  case supervisor:start_child(Sup, inode_spec(Name, [revive, StoreKey, Sup])) of
+    {ok, Pid} ->
+      {ok, Pid};
+    {error, {already_started, Pid}} ->
+      {ok, Pid};
+    Other ->
+      Other
+  end.

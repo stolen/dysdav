@@ -100,7 +100,19 @@ do_add_child(ChildSpec, Options, State) ->
 
 do_add_valid_child({_Name, _, _, _} = Spec, _Options, #state{inode = Inode} = State) when ?LEAF(Inode) ->
   InodeUpdated = dys_inode:insert_inode_child(Spec, Inode),
-  handle_growth(InodeUpdated, State).
+  handle_growth(InodeUpdated, State);
+
+do_add_valid_child({Name, _, _, _} = Spec, _Options, #state{inode = Inode} = State) ->
+  {WhereInsert, OtherChildren} = dys_inode:where_insert(Name, Inode),
+  {InsertResult, StateNextInserted} = insert_next(WhereInsert, Spec, State),
+  InodeUpdated = dys_inode:finish_insert(InsertResult, OtherChildren, Inode),
+  handle_growth(InodeUpdated, StateNextInserted).
+
+insert_next({_, _, NextKey, _}, Spec, #state{sup = Sup} = State) ->
+  {ok, NextPid} = dys_inode_sup:revive(Sup, NextKey),
+  {ok, InsertResult} = ?MODULE:add_child(NextPid, Spec, []),
+  {InsertResult, State}.
+
 
 handle_growth(InodeUpdated, #state{} = State) ->
   case dys_inode:needs_split(InodeUpdated) of

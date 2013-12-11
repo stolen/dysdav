@@ -2,7 +2,7 @@
 
 -define(MAX_CHILDREN,
 %        ?INODE_ORDER).
-        1). % test
+        3). % test
 
 -define(MIN_CHILDREN,
 %        ?INODE_ORDER div 3). % Choose good value to avoid often merges but keep inodes pretty full

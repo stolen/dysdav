@@ -2,11 +2,12 @@
 -include("dys_inode.hrl").
 
 % low-level inode functions.
--export([create/0, dump/1, store_key/1, restore/1]).
+-export([create/0, dump/1, id/1, store_key/1, restore/1]).
 
 % High-level inode interface
 -export([check/1, make_summary/1]).
 -export([insert_inode_child/2, needs_split/1]).
+-export([where_insert/2, finish_insert/3]).
 
 
 % Check inode, future: possibly fix
@@ -35,6 +36,12 @@ dump(#inode_v0{} = Inode) ->
 % Generate storage key for given inode.
 store_key(#inode_v0{id = ID, version = Version}) when is_binary(ID), is_integer(Version) ->
   iolist_to_binary([ID, $:, integer_to_list(Version)]).
+
+id(#inode_v0{id = ID}) ->
+  ID;
+id(StoreKey) when is_binary(StoreKey) ->
+  [ID, _] = binary:split(StoreKey, <<":">>),
+  ID.
 
 % Restore inode from dump
 restore(Bin) ->
@@ -104,7 +111,7 @@ needs_split(#inode_v0{root = true, leaf = Leaf, id = Id, version = Ver0,
 
   Inode1 = ChildSkel#inode_v0{id = gen_id(), children = Ch1},
   Inode2 = ChildSkel#inode_v0{id = gen_id(), children = Ch2},
-  NewRoot = Inode0#inode_v0{version = Ver0 + 1,
+  NewRoot = Inode0#inode_v0{leaf = false, version = Ver0 + 1,
                             parent = {Id, Ver0}, actions = [{Now, new_level}],
                             children = [
         make_summary(Inode1),
@@ -113,3 +120,22 @@ needs_split(#inode_v0{root = true, leaf = Leaf, id = Id, version = Ver0,
   {children, NewRoot, [Inode1, Inode2]}.
 
 
+where_insert(Name, #inode_v0{children = Children}) ->
+  take_insert_location(Name, [], Children).
+
+% Some kind of zipper here: search for good place for key insertion and return matching child and other children as zipper
+take_insert_location(Name, Less, [{{_Min, Max}, {inode, _}, _, _} = Cur|Greater]) when Max < Name ->
+  % This inode has too low key range, continue search
+  take_insert_location(Name, [Cur|Less], Greater);
+take_insert_location(Name, Less, [{{_Min, Max}, {inode, _}, _, _} = Cur|Greater]) when Name =< Max ->
+  % Found child inode with appropriate key range
+  % possibly key is too small for next children, but pass it there (TODO: possible balancing here)
+  {Cur, {Less, Greater}};
+take_insert_location(_Name, [Last|Less], []) ->
+  % All child inodes contain keys that compare less to Name -> select last (greatest) one
+  {Last, {Less, []}}.
+ 
+% Construct back child list
+finish_insert(InsertResult, {Less, Greater}, #inode_v0{} = Inode) ->
+  NewChildren = lists:reverse(Less, InsertResult ++ Greater),
+  Inode#inode_v0{children = NewChildren}.
